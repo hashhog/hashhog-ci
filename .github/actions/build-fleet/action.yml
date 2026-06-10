@@ -64,6 +64,24 @@ runs:
         echo "libsecp256k1 $(pkg-config --modversion libsecp256k1) installed; ellswift header:"
         ls -l /usr/include/secp256k1_ellswift.h
 
+    - name: Build minisketch from source (haskoin Erlay lib)
+      if: contains(inputs.impls, 'haskoin') || inputs.impls == 'all'
+      shell: bash
+      run: |
+        set -euo pipefail
+        # haskoin links libminisketch (extra-libraries in haskoin.cabal); it is
+        # not packaged in apt. Build from source to /usr/local, matching the
+        # on-box /usr/local/lib/libminisketch.a.
+        git clone --depth 1 \
+          https://github.com/bitcoin-core/minisketch.git /tmp/minisketch
+        cd /tmp/minisketch
+        ./autogen.sh
+        ./configure --prefix=/usr/local
+        make -j"$(nproc)"
+        sudo make install
+        sudo ldconfig
+        ls -l /usr/local/lib/libminisketch.* /usr/local/include/minisketch.h
+
     # -------------------------------------------------------------------------
     # Toolchains + caches (each gated by `inputs.impls`)
     # -------------------------------------------------------------------------
@@ -360,7 +378,10 @@ runs:
       run: |
         cd ouroboros
         python3 -m venv .venv
-        .venv/bin/pip install --upgrade pip wheel maturin
+        # setuptools is REQUIRED: `pip install -e . --no-build-isolation` below
+        # uses the venv's own build backend (setuptools.build_meta); a fresh venv
+        # ships pip but not setuptools → BackendUnavailable without this.
+        .venv/bin/pip install --upgrade pip wheel setuptools maturin
         # The maturin wheel (ferrous-utils sync rust ext) and the ouroboros
         # package are SEPARATE installs, not alternatives. The old `wheel || -e .`
         # form only ran `-e .` when the wheel install FAILED, so the ouroboros
