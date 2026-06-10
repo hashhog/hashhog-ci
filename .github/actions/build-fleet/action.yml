@@ -129,7 +129,10 @@ runs:
       uses: actions/setup-python@v5
       with:
         python-version: "3.12"
-        cache: pip
+        # No `cache: pip`: it hard-errors when the workspace has no
+        # requirements.txt/pyproject.toml, which is the case for any
+        # single-impl sweep that doesn't clone ouroboros (the only impl
+        # carrying a pyproject). pip caching isn't worth the breakage.
 
     - name: Cache OPAM (camlcoin)
       if: contains(inputs.impls, 'camlcoin') || inputs.impls == 'all'
