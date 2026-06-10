@@ -134,6 +134,15 @@ runs:
         # single-impl sweep that doesn't clone ouroboros (the only impl
         # carrying a pyproject). pip caching isn't worth the breakage.
 
+    - name: Install Python harness deps
+      shell: bash
+      run: |
+        # wo_lib.py (watch-only family's offline key/descriptor constructor)
+        # needs coincurve for secp256k1; without it the wallet arms SKIP
+        # 'python coincurve not installed'. coincurve ships manylinux wheels
+        # so no libsecp256k1 build step is required.
+        python3 -m pip install --quiet coincurve
+
     - name: Cache OPAM (camlcoin)
       if: contains(inputs.impls, 'camlcoin') || inputs.impls == 'all'
       uses: actions/cache@v4
