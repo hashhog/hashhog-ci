@@ -34,7 +34,7 @@ runs:
         sudo apt-get install -y --no-install-recommends \
           build-essential cmake pkg-config \
           libssl-dev libboost-all-dev librocksdb-dev libleveldb-dev \
-          libsqlite3-dev libzmq3-dev \
+          libsqlite3-dev libzmq3-dev libsecp256k1-dev \
           luajit lua-cjson \
           erlang rebar3 \
           ocaml opam \
@@ -91,6 +91,10 @@ runs:
     - name: Set up Nim toolchain
       if: contains(inputs.impls, 'nimrod') || inputs.impls == 'all'
       uses: jiro4989/setup-nim-action@v2
+      with:
+        # Pin to the on-box version — "latest stable" pulls a newer nimble whose
+        # `nimble setup` throws FieldDefect (field 'packages' ... actionSetup).
+        nim-version: '2.2.8'
 
     - name: Cache Nim build (nimrod)
       if: contains(inputs.impls, 'nimrod') || inputs.impls == 'all'
@@ -272,6 +276,9 @@ runs:
         eval $(opam env)
         cd camlcoin
         opam install . --deps-only -y
+        # bigstring is used by the code but not pulled by --deps-only in a fresh
+        # CI switch (present in the on-box switch); install it explicitly.
+        opam install bigstring -y
         dune build --force @install
         test -x _build/default/bin/main.exe
 

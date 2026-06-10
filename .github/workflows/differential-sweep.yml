@@ -210,6 +210,23 @@ jobs:
           echo "status=$status" >> "$GITHUB_OUTPUT"
           exit "$rc"
 
+      - name: Collect node logs (diagnose boot/run failures)
+        if: always()
+        shell: bash
+        run: |
+          # The arms write per-node logs under /tmp (e.g. /tmp/gto-<impl>/node.log,
+          # /tmp/<family>-regression/). They are NOT in the harness stdout, so a
+          # "exited during startup" failure is opaque without them. Fold any node
+          # logs into the uploaded artifact so boot errors are diagnosable.
+          mkdir -p sweep-results/nodelogs
+          find /tmp -maxdepth 3 \( -name 'node.log' -o -name '*.log' \) 2>/dev/null \
+            | grep -vE '/(gettxout|.*-regression)\.log$' \
+            | while read -r f; do
+                dest="sweep-results/nodelogs/$(echo "$f" | tr '/' '_')"
+                cp "$f" "$dest" 2>/dev/null || true
+              done
+          ls -la sweep-results/nodelogs/ 2>/dev/null || true
+
       - name: Upload per-impl results
         if: always()
         uses: actions/upload-artifact@v4
