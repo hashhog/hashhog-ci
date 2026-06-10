@@ -31,6 +31,7 @@ name: Differential sweep (family x impl)
         type: choice
         required: true
         options:
+          - bytediff
           - chaintxstats
           - coinstatsindex
           - getblockfilter
@@ -84,6 +85,7 @@ jobs:
           ALL="rustoshi blockbrew clearbit nimrod camlcoin beamchain hotbuns ouroboros lunarblock haskoin"
 
           declare -A ENVVAR=(
+            [bytediff]=BYTEDIFF_IMPLS
             [chaintxstats]=CHAINTXSTATS_IMPLS
             [coinstatsindex]=COINSTATSINDEX_IMPLS
             [getblockfilter]=GBF_IMPLS
