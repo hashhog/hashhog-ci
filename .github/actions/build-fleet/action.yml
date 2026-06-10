@@ -1,0 +1,366 @@
+name: "Build Fleet (composite)"
+description: >
+  Build every (selected) hashhog impl + Bitcoin Core in-place on the runner so
+  that the cross-impl matrix scripts (smoke-harness, snapshot-byte-identity,
+  snapshot-interop-matrix, bip324-interop-matrix) can launch them on private
+  ports.  Heavily cached per-language so warm runs land in single-digit
+  minutes.
+
+inputs:
+  impls:
+    description: "Comma-separated list of impls to build, or 'all'"
+    required: false
+    default: "all"
+  include-core:
+    description: "Whether to build Bitcoin Core reference"
+    required: false
+    default: "true"
+  cache-key-suffix:
+    description: "Optional cache-bust suffix (use to invalidate stale caches)"
+    required: false
+    default: ""
+
+runs:
+  using: "composite"
+  steps:
+    # -------------------------------------------------------------------------
+    # System deps (mirrors _bootstrap-fleet.yml, plus psmisc for the matrix
+    # scripts' `fuser -k` calls and curl/jq for RPC probing).
+    # -------------------------------------------------------------------------
+    - name: Install system dependencies
+      shell: bash
+      run: |
+        sudo apt-get update -qq
+        sudo apt-get install -y --no-install-recommends \
+          build-essential cmake pkg-config \
+          libssl-dev libboost-all-dev librocksdb-dev libleveldb-dev \
+          libsqlite3-dev libzmq3-dev \
+          luajit lua-cjson \
+          erlang rebar3 \
+          ocaml opam \
+          python3 python3-pip python3-dev \
+          wget curl git jq psmisc
+
+    # -------------------------------------------------------------------------
+    # Toolchains + caches (each gated by `inputs.impls`)
+    # -------------------------------------------------------------------------
+    - name: Set up Rust toolchain
+      if: contains(inputs.impls, 'rustoshi') || inputs.impls == 'all'
+      uses: dtolnay/rust-toolchain@stable
+
+    - name: Cache Rust build (rustoshi)
+      if: contains(inputs.impls, 'rustoshi') || inputs.impls == 'all'
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+          rustoshi/target
+        key: rust-rustoshi-${{ runner.os }}-${{ hashFiles('rustoshi/Cargo.lock') }}${{ inputs.cache-key-suffix }}
+        restore-keys: |
+          rust-rustoshi-${{ runner.os }}-
+
+    - name: Set up Go toolchain
+      if: contains(inputs.impls, 'blockbrew') || inputs.impls == 'all'
+      uses: actions/setup-go@v5
+      with:
+        # blockbrew/go.mod declares `go 1.24.0`; pinning 1.22 made GOTOOLCHAIN
+        # silently download go1.24 every run (slow, fragile).
+        go-version: "1.24"
+        cache-dependency-path: blockbrew/go.sum
+
+    - name: Set up Zig toolchain
+      if: contains(inputs.impls, 'clearbit') || inputs.impls == 'all'
+      uses: mlugg/setup-zig@v1
+      with:
+        version: "0.13.0"
+
+    - name: Cache Zig build (clearbit)
+      if: contains(inputs.impls, 'clearbit') || inputs.impls == 'all'
+      uses: actions/cache@v4
+      with:
+        path: |
+          clearbit/zig-cache
+          clearbit/.zig-cache
+          clearbit/zig-out
+          ~/.cache/zig
+        key: zig-clearbit-${{ runner.os }}-${{ hashFiles('clearbit/build.zig', 'clearbit/build.zig.zon') }}${{ inputs.cache-key-suffix }}
+        restore-keys: |
+          zig-clearbit-${{ runner.os }}-
+
+    - name: Set up Nim toolchain
+      if: contains(inputs.impls, 'nimrod') || inputs.impls == 'all'
+      uses: jiro4989/setup-nim-action@v2
+
+    - name: Cache Nim build (nimrod)
+      if: contains(inputs.impls, 'nimrod') || inputs.impls == 'all'
+      uses: actions/cache@v4
+      with:
+        path: |
+          nimrod/nimcache
+          ~/.nimble
+        key: nim-nimrod-${{ runner.os }}-${{ hashFiles('nimrod/**/*.nim', 'nimrod/nimrod.nimble') }}${{ inputs.cache-key-suffix }}
+        restore-keys: |
+          nim-nimrod-${{ runner.os }}-
+
+    - name: Set up Haskell toolchain
+      if: contains(inputs.impls, 'haskoin') || inputs.impls == 'all'
+      uses: haskell-actions/setup@v2
+      with:
+        ghc-version: "9.6"
+        enable-stack: false
+
+    - name: Cache Cabal build (haskoin)
+      if: contains(inputs.impls, 'haskoin') || inputs.impls == 'all'
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cabal/store
+          haskoin/dist-newstyle
+        key: cabal-haskoin-${{ runner.os }}-${{ hashFiles('haskoin/haskoin.cabal', 'haskoin/cabal.project') }}${{ inputs.cache-key-suffix }}
+        restore-keys: |
+          cabal-haskoin-${{ runner.os }}-
+
+    - name: Set up Bun
+      if: contains(inputs.impls, 'hotbuns') || inputs.impls == 'all'
+      uses: oven-sh/setup-bun@v2
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.12"
+        cache: pip
+
+    - name: Cache OPAM (camlcoin)
+      if: contains(inputs.impls, 'camlcoin') || inputs.impls == 'all'
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.opam
+          camlcoin/_build
+        key: opam-camlcoin-${{ runner.os }}-${{ hashFiles('camlcoin/dune-project', 'camlcoin/*.opam') }}${{ inputs.cache-key-suffix }}
+        restore-keys: |
+          opam-camlcoin-${{ runner.os }}-
+
+    - name: Cache rebar3 (beamchain)
+      if: contains(inputs.impls, 'beamchain') || inputs.impls == 'all'
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cache/rebar3
+          beamchain/_build
+        key: rebar3-beamchain-${{ runner.os }}-${{ hashFiles('beamchain/rebar.config', 'beamchain/rebar.lock') }}${{ inputs.cache-key-suffix }}
+        restore-keys: |
+          rebar3-beamchain-${{ runner.os }}-
+
+    - name: Cache ouroboros wheels
+      if: contains(inputs.impls, 'ouroboros') || inputs.impls == 'all'
+      uses: actions/cache@v4
+      with:
+        path: |
+          ouroboros/target
+          ouroboros/.venv
+        key: ouroboros-${{ runner.os }}-${{ hashFiles('ouroboros/ferrous-utils/sync/Cargo.lock', 'ouroboros/pyproject.toml') }}${{ inputs.cache-key-suffix }}
+        restore-keys: |
+          ouroboros-${{ runner.os }}-
+
+    # -------------------------------------------------------------------------
+    # Bitcoin Core (used by snapshot-byte-identity.sh as the reference miner).
+    # -------------------------------------------------------------------------
+    - name: Cache Bitcoin Core build
+      if: inputs.include-core == 'true'
+      id: core-cache
+      uses: actions/cache@v4
+      with:
+        path: bitcoin-core/build
+        # '-walleton' busts the pre-2026-06 wallet-OFF caches (restore-keys
+        # would otherwise resurrect a stale -DENABLE_WALLET=OFF build and the
+        # flag flip below would be a silent no-op).  src/version.h no longer
+        # exists upstream (hashFiles silently matched nothing); key on
+        # clientversion.h instead.
+        key: bitcoin-core-walleton-${{ runner.os }}-${{ hashFiles('bitcoin-core/src/clientversion.h', 'bitcoin-core/CMakeLists.txt') }}${{ inputs.cache-key-suffix }}
+        restore-keys: |
+          bitcoin-core-walleton-${{ runner.os }}-
+
+    - name: Build Bitcoin Core
+      if: inputs.include-core == 'true'
+      shell: bash
+      run: |
+        if [ ! -f bitcoin-core/build/bin/bitcoind ]; then
+          cd bitcoin-core
+          # ENABLE_WALLET=ON unblocks wallet-family differential arms in CI
+          # (libsqlite3-dev is already in the apt list above); cache key
+          # carries '-walleton' so old wallet-OFF builds can't be restored.
+          cmake -B build \
+            -DBUILD_TESTS=OFF \
+            -DBUILD_GUI=OFF \
+            -DWITH_ZMQ=OFF \
+            -DENABLE_WALLET=ON \
+            -DCMAKE_BUILD_TYPE=Release
+          cmake --build build -j$(nproc) --target bitcoind bitcoin-cli
+          # Prune intermediate objects before the post-job cache save so the
+          # Core cache respects the 10 GB per-repo Actions cache budget
+          # (build/bin + libs survive; the bitcoind-exists guard above means
+          # a restored pruned cache never triggers a rebuild).
+          find build -type f -name '*.o' -delete || true
+        else
+          echo "Bitcoin Core already built (cached)"
+        fi
+
+    # -------------------------------------------------------------------------
+    # Per-impl builds (gated by inputs.impls)
+    # -------------------------------------------------------------------------
+    - name: Build Rustoshi
+      if: contains(inputs.impls, 'rustoshi') || inputs.impls == 'all'
+      shell: bash
+      run: |
+        cd rustoshi
+        cargo build --release 2>&1 | tail -10
+        test -x target/release/rustoshi
+
+    - name: Build Blockbrew
+      if: contains(inputs.impls, 'blockbrew') || inputs.impls == 'all'
+      shell: bash
+      run: |
+        cd blockbrew
+        go build ./cmd/blockbrew
+        test -x blockbrew
+
+    - name: Build Clearbit
+      if: contains(inputs.impls, 'clearbit') || inputs.impls == 'all'
+      shell: bash
+      run: |
+        cd clearbit
+        zig build -Doptimize=ReleaseFast
+        test -x zig-out/bin/clearbit
+
+    - name: Build Nimrod
+      if: contains(inputs.impls, 'nimrod') || inputs.impls == 'all'
+      shell: bash
+      run: |
+        cd nimrod
+        nimble setup -y
+        nimble build -d:release
+        test -x bin/nimrod
+
+    - name: Build Camlcoin
+      if: contains(inputs.impls, 'camlcoin') || inputs.impls == 'all'
+      shell: bash
+      run: |
+        opam init --bare -y
+        opam switch create default ocaml-base-compiler --yes 2>/dev/null || opam switch default
+        eval $(opam env)
+        cd camlcoin
+        opam install . --deps-only -y
+        dune build --force @install
+        test -x _build/default/bin/main.exe
+
+    - name: Build Beamchain (prod release)
+      if: contains(inputs.impls, 'beamchain') || inputs.impls == 'all'
+      shell: bash
+      run: |
+        cd beamchain
+        # smoke-harness + snapshot scripts launch the prod release binary
+        # (`_build/prod/rel/beamchain/bin/beamchain`); rebar3 escriptize alone
+        # is not enough.  escriptize is still run first for parity with
+        # build-all.sh (the escript embeds .beam files — a stale escript once
+        # shipped week-old code, caught 2026-06-09).
+        rebar3 compile
+        rebar3 escriptize \
+          || echo "::warning::beamchain escriptize failed (escript artifact unavailable)"
+        rebar3 as prod release || rebar3 release || true
+        test -f _build/prod/rel/beamchain/bin/beamchain \
+          || test -f _build/default/bin/beamchain \
+          || (echo "beamchain release missing — bip324/snapshot scripts will skip" && exit 0)
+
+    - name: Build Hotbuns
+      if: contains(inputs.impls, 'hotbuns') || inputs.impls == 'all'
+      shell: bash
+      run: |
+        cd hotbuns
+        bun install
+
+    - name: Build Haskoin
+      if: contains(inputs.impls, 'haskoin') || inputs.impls == 'all'
+      shell: bash
+      run: |
+        cd haskoin
+        # haskoin needs the rocksdb_compat shim for librocksdb 9.x; the script
+        # ships in the haskoin submodule.
+        if [ -f scripts/build-rocksdb-compat.sh ]; then
+          bash scripts/build-rocksdb-compat.sh || true
+        fi
+        cabal update
+        cabal build all
+        find dist-newstyle -name haskoin -type f -executable | head -1 \
+          || (echo "haskoin binary not produced" && exit 0)
+
+    - name: Prepare Ouroboros
+      if: contains(inputs.impls, 'ouroboros') || inputs.impls == 'all'
+      shell: bash
+      run: |
+        cd ouroboros
+        python3 -m venv .venv
+        .venv/bin/pip install --upgrade pip wheel maturin
+        .venv/bin/maturin build --release \
+          --manifest-path ferrous-utils/sync/Cargo.toml || true
+        .venv/bin/pip install target/wheels/*.whl 2>/dev/null \
+          || .venv/bin/pip install -e . --no-build-isolation || true
+
+    - name: Verify Lunarblock entrypoint
+      if: contains(inputs.impls, 'lunarblock') || inputs.impls == 'all'
+      shell: bash
+      run: |
+        test -f lunarblock/src/main.lua
+        luajit -e 'print("luajit:", _VERSION)'
+
+    # -------------------------------------------------------------------------
+    # Build manifest (single source of truth: did each impl build?)
+    # -------------------------------------------------------------------------
+    - name: Build manifest
+      if: always()
+      shell: bash
+      run: |
+        {
+          echo "=== Build manifest ==="
+          echo "Commit: ${{ github.sha }}"
+          echo "Date:   $(date -u +%FT%TZ)"
+          echo "Impls:  ${{ inputs.impls }}"
+          echo "Core:   ${{ inputs.include-core }}"
+          echo
+          declare -a EXPECTED=(
+            "core:bitcoin-core/build/bin/bitcoind"
+            "rustoshi:rustoshi/target/release/rustoshi"
+            "blockbrew:blockbrew/blockbrew"
+            "clearbit:clearbit/zig-out/bin/clearbit"
+            "nimrod:nimrod/bin/nimrod"
+            "camlcoin:camlcoin/_build/default/bin/main.exe"
+          )
+          for entry in "${EXPECTED[@]}"; do
+            name="${entry%%:*}"
+            path="${entry#*:}"
+            if [ -e "$path" ]; then
+              size=$(stat -c%s "$path" 2>/dev/null || echo "?")
+              echo "OK    $name ($size bytes) $path"
+            else
+              echo "MISS  $name"
+            fi
+          done
+          echo
+          if [ -f beamchain/_build/prod/rel/beamchain/bin/beamchain ]; then
+            echo "OK    beamchain prod-release"
+          elif [ -f beamchain/_build/default/bin/beamchain ]; then
+            echo "OK    beamchain escript"
+          else
+            echo "MISS  beamchain"
+          fi
+          echo
+          echo "haskoin binaries:"
+          find haskoin/dist-newstyle -name haskoin -type f -executable 2>/dev/null \
+            | head -5 || echo "  (none found)"
+          echo
+          echo "hotbuns node_modules: $(test -d hotbuns/node_modules && echo OK || echo MISS)"
+          ls ouroboros/target/wheels/ 2>/dev/null \
+            | head -5 \
+            || echo "ouroboros wheels: (none)"
+        } | tee /tmp/build-manifest.txt

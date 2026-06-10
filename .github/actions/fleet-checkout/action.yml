@@ -1,0 +1,75 @@
+name: "Fleet checkout (composite)"
+description: >
+  Clone the PUBLIC hashhog impl repos + test-suite + a pinned Bitcoin Core
+  into $GITHUB_WORKSPACE, laid out exactly as the meta-repo working tree
+  (<root>/<impl>, <root>/test-suite, <root>/bitcoin-core). This replaces the
+  private-meta-repo submodule checkout: every source here is public, cloned
+  anonymously over HTTPS, so no token or submodule access to hashhog/hashhog
+  is required. The scrubbed harness arms derive HASHHOG_ROOT from test-suite's
+  location (and the workflow exports it), so they run unmodified.
+
+inputs:
+  impls:
+    description: "Comma-separated impls to clone, or 'all'"
+    required: false
+    default: "all"
+  include-core:
+    description: "Clone Bitcoin Core (pinned)"
+    required: false
+    default: "true"
+  core-ref:
+    description: "Bitcoin Core commit to pin (the oracle the project validates against)"
+    required: false
+    # v21.99-guixtest1-19307-g2b6af628b1 — the v31.99 master snapshot the
+    # hashhog differential boards are measured against. Pinned for reproducible
+    # oracle behavior; bump deliberately, never float.
+    default: "2b6af628b140dc9d415733e5dc1577f3e54819af"
+
+runs:
+  using: "composite"
+  steps:
+    - name: Clone test-suite + impl(s) + Core
+      shell: bash
+      env:
+        IMPLS: ${{ inputs.impls }}
+        INCLUDE_CORE: ${{ inputs.include-core }}
+        CORE_REF: ${{ inputs.core-ref }}
+      run: |
+        set -euo pipefail
+        cd "$GITHUB_WORKSPACE"
+        ALL="rustoshi blockbrew clearbit nimrod camlcoin beamchain hotbuns ouroboros lunarblock haskoin"
+
+        clone_shallow() { # <url> <dir>
+          local url="$1" dir="$2"
+          if [ -d "$dir/.git" ]; then echo "  $dir already present"; return; fi
+          git clone --depth 1 "$url" "$dir"
+          echo "  cloned $dir @ $(git -C "$dir" rev-parse --short HEAD)"
+        }
+
+        echo "== test-suite =="
+        clone_shallow https://github.com/hashhog/test-suite.git test-suite
+
+        if [ "$(echo "$IMPLS" | tr -d ' ')" = "all" ]; then chosen="$ALL"; else
+          chosen="$(echo "$IMPLS" | tr ',' ' ')"
+        fi
+        echo "== impls: $chosen =="
+        for i in $chosen; do
+          case " $ALL " in *" $i "*) ;; *) echo "::error::unknown impl '$i'"; exit 1 ;; esac
+          clone_shallow "https://github.com/hashhog/${i}.git" "$i"
+        done
+
+        if [ "$INCLUDE_CORE" = "true" ]; then
+          echo "== bitcoin-core @ $CORE_REF =="
+          if [ ! -d bitcoin-core/.git ]; then
+            # fetch the exact pinned commit shallowly (no full history)
+            mkdir -p bitcoin-core && cd bitcoin-core && git init -q
+            git remote add origin https://github.com/bitcoin/bitcoin.git
+            git fetch --depth 1 origin "$CORE_REF"
+            git checkout -q FETCH_HEAD
+            echo "  bitcoin-core @ $(git rev-parse --short HEAD)"
+            cd "$GITHUB_WORKSPACE"
+          fi
+        fi
+
+        echo "== layout =="
+        ls -d */ | sed 's,^,  ,'

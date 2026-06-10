@@ -1,0 +1,274 @@
+name: Differential sweep (family x impl)
+
+# On-demand differential regression sweep, run from the PUBLIC hashhog-ci repo.
+# Runs one test-suite harness family (test-suite/run-<family>-regression.sh)
+# against any subset of the 10 impls, one impl per matrix job, each job fully
+# isolated: it clones (public, anonymous HTTPS) only its impl + test-suite +
+# the pinned Core oracle, builds them, launches its own regtest nodes on
+# private ports, and reports PASS/FAIL/SKIP.
+#
+# Output: per-job summary + log artifact, plus a final aggregate gap-map.json.
+#
+# WHY a separate repo: the meta repo (hashhog/hashhog) is PRIVATE; everything
+# this workflow needs is public (the 10 impl repos + hashhog/test-suite), so
+# it clones them directly and never needs submodule/token access to the meta
+# repo. Free Actions minutes (public repo), no PAT.
+#
+# NOTES
+# - The harness arms honor HASHHOG_ROOT (machine paths were scrubbed for the
+#   public test-suite release); the workflow exports it = $GITHUB_WORKSPACE,
+#   where fleet-checkout lays out <impl>/, test-suite/, bitcoin-core/.
+# - tools/regtest-slot.sh is NOT used: it is a maxbox-only concurrency/cgroup
+#   gate; CI runners are single-tenant so the harness runs bare.
+# - Wallet-substrate families (history/import/recovery/spend/watchonly) run
+#   without a Core oracle process (impl-only arms); all others build Core.
+
+on:
+  workflow_dispatch:
+    inputs:
+      family:
+        description: "Harness family"
+        type: choice
+        required: true
+        options:
+          - chaintxstats
+          - coinstatsindex
+          - getblockfilter
+          - getblockheader
+          - getindexinfo
+          - getnodeaddresses
+          - getrawtransaction
+          - gettxout
+          - gettxoutproof
+          - gettxoutsetinfo
+          - history
+          - import
+          - policy
+          - rbf
+          - recovery
+          - scanblocks
+          - scantxoutset
+          - spend
+          - watchonly
+      impls:
+        description: "Comma list of impls, or 'all'"
+        type: string
+        default: "all"
+
+concurrency:
+  group: differential-sweep-${{ github.ref }}-${{ inputs.family }}
+  cancel-in-progress: false
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Plan: validate inputs against allowlists, resolve the family's IMPLS env
+  # var (the runner scripts use non-uniform names, e.g. GBF_IMPLS), and decide
+  # whether the family needs the Core oracle built.
+  # ---------------------------------------------------------------------------
+  plan:
+    name: Plan sweep
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      impls_json: ${{ steps.plan.outputs.impls_json }}
+      env_var: ${{ steps.plan.outputs.env_var }}
+      include_core: ${{ steps.plan.outputs.include_core }}
+    steps:
+      - name: Resolve matrix + family metadata
+        id: plan
+        env:
+          FAMILY: ${{ inputs.family }}
+          IMPLS_INPUT: ${{ inputs.impls }}
+        run: |
+          set -euo pipefail
+          ALL="rustoshi blockbrew clearbit nimrod camlcoin beamchain hotbuns ouroboros lunarblock haskoin"
+
+          declare -A ENVVAR=(
+            [chaintxstats]=CHAINTXSTATS_IMPLS
+            [coinstatsindex]=COINSTATSINDEX_IMPLS
+            [getblockfilter]=GBF_IMPLS
+            [getblockheader]=GBH_IMPLS
+            [getindexinfo]=GETINDEXINFO_IMPLS
+            [getnodeaddresses]=GNA_IMPLS
+            [getrawtransaction]=GRT_IMPLS
+            [gettxout]=GETTXOUT_IMPLS
+            [gettxoutproof]=GETTXOUTPROOF_IMPLS
+            [gettxoutsetinfo]=GTXO_IMPLS
+            [history]=HISTORY_IMPLS
+            [import]=IMPORT_IMPLS
+            [policy]=POLICY_IMPLS
+            [rbf]=RBF_IMPLS
+            [recovery]=RECOVERY_IMPLS
+            [scanblocks]=SCANBLOCKS_IMPLS
+            [scantxoutset]=SCANTXOUTSET_IMPLS
+            [spend]=SPEND_IMPLS
+            [watchonly]=WATCHONLY_IMPLS
+          )
+          declare -A NO_ORACLE=([history]=1 [import]=1 [recovery]=1 [spend]=1 [watchonly]=1)
+
+          var="${ENVVAR[$FAMILY]:-}"
+          if [ -z "$var" ]; then echo "::error::Unknown family '$FAMILY'"; exit 1; fi
+          echo "env_var=$var" >> "$GITHUB_OUTPUT"
+
+          if [ -n "${NO_ORACLE[$FAMILY]:-}" ]; then
+            echo "include_core=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "include_core=true" >> "$GITHUB_OUTPUT"
+          fi
+
+          if [ "$(echo "$IMPLS_INPUT" | tr -d ' ')" = "all" ]; then
+            chosen="$ALL"
+          else
+            chosen=""
+            for i in $(echo "$IMPLS_INPUT" | tr ',' ' '); do
+              case " $ALL " in
+                *" $i "*) chosen="$chosen $i" ;;
+                *) echo "::error::Unknown impl '$i'"; exit 1 ;;
+              esac
+            done
+          fi
+          json=$(printf '%s\n' $chosen | jq -R . | jq -cs .)
+          echo "Matrix impls: $json"
+          echo "impls_json=$json" >> "$GITHUB_OUTPUT"
+
+  # ---------------------------------------------------------------------------
+  # Sweep: one job per impl. Clones + builds ONLY that impl (+ Core oracle when
+  # the family needs it), then runs the family runner constrained to that impl.
+  # ---------------------------------------------------------------------------
+  sweep:
+    name: ${{ inputs.family }} / ${{ matrix.impl }}
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 120   # cold caches: GHC/opam/Core can each take 30+ min
+    strategy:
+      fail-fast: false
+      matrix:
+        impl: ${{ fromJSON(needs.plan.outputs.impls_json) }}
+    steps:
+      - name: Checkout hashhog-ci (workflow + composites)
+        uses: actions/checkout@v4
+
+      - name: Clone fleet (public repos + pinned Core)
+        uses: ./.github/actions/fleet-checkout
+        with:
+          impls: ${{ matrix.impl }}
+          include-core: ${{ needs.plan.outputs.include_core }}
+
+      - name: Build ${{ matrix.impl }} (+ oracle if needed)
+        uses: ./.github/actions/build-fleet
+        with:
+          impls: ${{ matrix.impl }}
+          include-core: ${{ needs.plan.outputs.include_core }}
+
+      - name: Run ${{ inputs.family }} regression for ${{ matrix.impl }}
+        id: run
+        env:
+          FAMILY: ${{ inputs.family }}
+          IMPL: ${{ matrix.impl }}
+          ENV_VAR: ${{ needs.plan.outputs.env_var }}
+        run: |
+          # GitHub's default step shell is `bash -e {0}`: clear errexit so a
+          # FAILING runner (exit 1 whenever FAIL>0 — the expected case) cannot
+          # abort the step before rc-capture/JSON/summary.
+          set -uo pipefail
+          set +e
+          # Scrubbed arms honor HASHHOG_ROOT; the fleet lives at the workspace root.
+          export HASHHOG_ROOT="$GITHUB_WORKSPACE"
+          mkdir -p sweep-results
+          export "$ENV_VAR=$IMPL"
+          bash "test-suite/run-${FAMILY}-regression.sh" \
+            2>&1 | tee "sweep-results/${FAMILY}-${IMPL}.log"
+          rc=${PIPESTATUS[0]}
+
+          counts=$(grep -oE 'PASS=[0-9]+ FAIL=[0-9]+ SKIP=[0-9]+' \
+                     "sweep-results/${FAMILY}-${IMPL}.log" | tail -1 || true)
+          pass=$(echo "$counts" | grep -oE 'PASS=[0-9]+' | cut -d= -f2); pass=${pass:-0}
+          fail=$(echo "$counts" | grep -oE 'FAIL=[0-9]+' | cut -d= -f2); fail=${fail:-0}
+          skip=$(echo "$counts" | grep -oE 'SKIP=[0-9]+' | cut -d= -f2); skip=${skip:-0}
+
+          if [ "$rc" -eq 0 ] && [ "$pass" -ge 1 ]; then status=PASS
+          elif [ "$rc" -eq 0 ]; then status=SKIP
+          else status=FAIL; fi
+
+          jq -n --arg impl "$IMPL" --arg family "$FAMILY" --arg status "$status" \
+                --argjson pass "$pass" --argjson fail "$fail" --argjson skip "$skip" \
+                --argjson rc "$rc" \
+                '{impl:$impl, family:$family, status:$status,
+                  pass:$pass, fail:$fail, skip:$skip, exit_code:$rc}' \
+            > "sweep-results/${FAMILY}-${IMPL}.json"
+
+          {
+            echo "## ${FAMILY} / ${IMPL}: ${status}"
+            echo ""
+            echo '```'
+            tail -20 "sweep-results/${FAMILY}-${IMPL}.log"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          echo "status=$status" >> "$GITHUB_OUTPUT"
+          exit "$rc"
+
+      - name: Upload per-impl results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sweep-${{ inputs.family }}-${{ matrix.impl }}
+          path: sweep-results/
+          retention-days: 30
+          if-no-files-found: warn
+
+  # ---------------------------------------------------------------------------
+  # Aggregate: merge every per-impl JSON fragment into one gap-map artifact.
+  # ---------------------------------------------------------------------------
+  aggregate:
+    name: Gap map
+    needs: [plan, sweep]
+    if: always() && needs.plan.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Download all sweep artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: sweep-${{ inputs.family }}-*
+          path: all-results/
+          merge-multiple: true
+
+      - name: Build gap-map.json + summary
+        env:
+          FAMILY: ${{ inputs.family }}
+        run: |
+          set -euo pipefail
+          mkdir -p gap-map
+          shopt -s nullglob
+          frags=(all-results/*.json)
+          if [ ${#frags[@]} -eq 0 ]; then
+            echo "::warning::No result fragments found (all sweep jobs may have died pre-run)"
+            jq -n --arg family "$FAMILY" \
+              '{family:$family, generated_at:(now|todate), results:{}, note:"no fragments"}' \
+              > gap-map/gap-map.json
+          else
+            jq -s --arg family "$FAMILY" \
+              '{family:$family,
+                generated_at:(now|todate),
+                results: (map({(.impl): {status, pass, fail, skip, exit_code}}) | add)}' \
+              "${frags[@]}" > gap-map/gap-map.json
+          fi
+          cat gap-map/gap-map.json
+
+          {
+            echo "# Differential sweep gap map — ${FAMILY}"
+            echo ""
+            echo "| impl | status | pass | fail | skip |"
+            echo "|------|--------|------|------|------|"
+            for f in "${frags[@]}"; do
+              jq -r '"| \(.impl) | \(.status) | \(.pass) | \(.fail) | \(.skip) |"' "$f"
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload gap map
+        uses: actions/upload-artifact@v4
+        with:
+          name: gap-map-${{ inputs.family }}-${{ github.run_id }}
+          path: gap-map/gap-map.json
+          retention-days: 90
