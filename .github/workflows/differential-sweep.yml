@@ -23,7 +23,7 @@ name: Differential sweep (family x impl)
 # - Wallet-substrate families (history/import/recovery/spend/watchonly) run
 #   without a Core oracle process (impl-only arms); all others build Core.
 
-on:
+"on":
   workflow_dispatch:
     inputs:
       family:
