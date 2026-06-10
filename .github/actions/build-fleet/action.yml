@@ -139,9 +139,16 @@ runs:
       run: |
         # wo_lib.py (watch-only family's offline key/descriptor constructor)
         # needs coincurve for secp256k1; without it the wallet arms SKIP
-        # 'python coincurve not installed'. coincurve ships manylinux wheels
-        # so no libsecp256k1 build step is required.
-        python3 -m pip install --quiet coincurve
+        # 'python coincurve not installed'. coincurve ships manylinux wheels.
+        #
+        # CRITICAL: the runner scripts set PATH="...:/usr/bin:..." with /usr/bin
+        # BEFORE setup-python's toolcache, so inside the arm `python3` resolves
+        # to the SYSTEM /usr/bin/python3 — NOT the setup-python 3.12. So install
+        # coincurve into BOTH and verify against the interpreter the arm uses.
+        python3 -m pip install coincurve
+        sudo /usr/bin/python3 -m pip install --break-system-packages coincurve
+        echo "verify (arm's interpreter):"
+        /usr/bin/python3 -c "import coincurve; print('coincurve', coincurve.__version__, 'on', __import__('sys').executable)"
 
     - name: Cache OPAM (camlcoin)
       if: contains(inputs.impls, 'camlcoin') || inputs.impls == 'all'
