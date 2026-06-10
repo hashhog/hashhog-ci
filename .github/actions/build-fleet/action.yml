@@ -33,13 +33,36 @@ runs:
         sudo apt-get update -qq
         sudo apt-get install -y --no-install-recommends \
           build-essential cmake pkg-config \
+          autoconf automake libtool \
           libssl-dev libboost-all-dev librocksdb-dev libleveldb-dev \
-          libsqlite3-dev libzmq3-dev libsecp256k1-dev \
-          luajit lua-cjson \
-          erlang rebar3 \
+          libsqlite3-dev libzmq3-dev \
+          luajit lua-cjson lua-socket \
           ocaml opam \
           python3 python3-pip python3-dev \
           wget curl git jq psmisc
+
+    - name: Build libsecp256k1 0.5.0 from source (ellswift module)
+      shell: bash
+      run: |
+        set -euo pipefail
+        # The runner's apt libsecp256k1-dev is too old: it lacks the ellswift
+        # module (header absent + secp256k1_ellswift_* symbols undefined), which
+        # blockbrew/clearbit/nimrod/haskoin all need for BIP-324 v2 transport.
+        # Build 0.5.0 from source with the same modules as the on-box (Debian 13)
+        # 0.5.0 so the impls link against a matching libsecp256k1.
+        git clone --depth 1 --branch v0.5.0 \
+          https://github.com/bitcoin-core/secp256k1.git /tmp/secp256k1
+        cd /tmp/secp256k1
+        ./autogen.sh
+        ./configure --prefix=/usr --libdir=/usr/lib/x86_64-linux-gnu \
+          --enable-module-ellswift --enable-module-schnorrsig \
+          --enable-module-extrakeys --enable-module-recovery \
+          --enable-module-ecdh --disable-tests --disable-benchmark
+        make -j"$(nproc)"
+        sudo make install
+        sudo ldconfig
+        echo "libsecp256k1 $(pkg-config --modversion libsecp256k1) installed; ellswift header:"
+        ls -l /usr/include/secp256k1_ellswift.h
 
     # -------------------------------------------------------------------------
     # Toolchains + caches (each gated by `inputs.impls`)
@@ -87,6 +110,15 @@ runs:
         key: zig-clearbit-${{ runner.os }}-${{ hashFiles('clearbit/build.zig', 'clearbit/build.zig.zon') }}${{ inputs.cache-key-suffix }}
         restore-keys: |
           zig-clearbit-${{ runner.os }}-
+
+    - name: Set up Erlang/OTP toolchain (beamchain)
+      if: contains(inputs.impls, 'beamchain') || inputs.impls == 'all'
+      uses: erlef/setup-beam@v1
+      with:
+        # Pin to the on-box OTP — the apt erlang is older and lacks
+        # binary:encode_hex/2 (added in OTP 26), used by beamchain_rpc:setup_auth.
+        otp-version: '27'
+        rebar3-version: '3'
 
     - name: Set up Nim toolchain
       if: contains(inputs.impls, 'nimrod') || inputs.impls == 'all'
@@ -329,10 +361,16 @@ runs:
         cd ouroboros
         python3 -m venv .venv
         .venv/bin/pip install --upgrade pip wheel maturin
+        # The maturin wheel (ferrous-utils sync rust ext) and the ouroboros
+        # package are SEPARATE installs, not alternatives. The old `wheel || -e .`
+        # form only ran `-e .` when the wheel install FAILED, so the ouroboros
+        # package was never installed → `python -m ouroboros.cli` died with
+        # ModuleNotFoundError. Install both, then assert importability.
         .venv/bin/maturin build --release \
-          --manifest-path ferrous-utils/sync/Cargo.toml || true
-        .venv/bin/pip install target/wheels/*.whl 2>/dev/null \
-          || .venv/bin/pip install -e . --no-build-isolation || true
+          --manifest-path ferrous-utils/sync/Cargo.toml
+        .venv/bin/pip install target/wheels/*.whl
+        .venv/bin/pip install -e . --no-build-isolation
+        .venv/bin/python3 -c "import ouroboros; print('ouroboros import OK')"
 
     - name: Verify Lunarblock entrypoint
       if: contains(inputs.impls, 'lunarblock') || inputs.impls == 'all'
