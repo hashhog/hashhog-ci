@@ -214,6 +214,10 @@ jobs:
         if: always()
         shell: bash
         run: |
+          # Diagnostic-only: NEVER fail the job (a green sweep with nothing to
+          # collect must stay green). `set +e` + `exit 0` guard against the
+          # grep-selects-nothing-exits-1 and similar non-fatal hiccups.
+          set +e
           # The arms write per-node logs under /tmp (e.g. /tmp/gto-<impl>/node.log,
           # /tmp/<family>-regression/). They are NOT in the harness stdout, so a
           # "exited during startup" failure is opaque without them. Fold any node
@@ -226,6 +230,7 @@ jobs:
                 cp "$f" "$dest" 2>/dev/null || true
               done
           ls -la sweep-results/nodelogs/ 2>/dev/null || true
+          exit 0
 
       - name: Upload per-impl results
         if: always()
